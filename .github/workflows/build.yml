@@ -1,0 +1,188 @@
+name: Build meminfo APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Generate project
+        run: |
+          mkdir -p proj/app/src/main/java/com/example/meminfo
+          cd proj
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "meminfo"
+          include ':app'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=false
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+          android {
+              namespace 'com.example.meminfo'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.example.meminfo'
+                  minSdk 21
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_1_8
+                  targetCompatibility JavaVersion.VERSION_1_8
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-feature android:name="android.software.leanback" android:required="false" />
+              <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+              <application
+                  android:label="MemInfo"
+                  android:allowBackup="false">
+                  <activity
+                      android:name=".ToastActivity"
+                      android:exported="true"
+                      android:theme="@android:style/Theme.Translucent.NoTitleBar">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                          <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/example/meminfo/ToastActivity.java <<'EOF'
+          package com.example.meminfo;
+
+          import android.app.Activity;
+          import android.app.ActivityManager;
+          import android.os.Bundle;
+          import android.os.Environment;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.os.StatFs;
+          import android.widget.Toast;
+
+          import java.io.BufferedReader;
+          import java.io.FileReader;
+          import java.util.Locale;
+
+          public class ToastActivity extends Activity {
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+
+                  ActivityManager am = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
+                  ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
+                  am.getMemoryInfo(mi);
+
+                  StatFs st = new StatFs(Environment.getDataDirectory().getPath());
+
+                  StringBuilder sb = new StringBuilder();
+                  String temp = readCpuTemp();
+                  if (temp != null) {
+                      sb.append("CPU: ").append(temp).append("\n");
+                  }
+                  sb.append("RAM: свободно ")
+                    .append(mi.availMem / 1048576).append(" из ")
+                    .append(mi.totalMem / 1048576).append(" МБ\n");
+                  sb.append("Память: свободно ")
+                    .append(gb(st.getAvailableBytes())).append(" из ")
+                    .append(gb(st.getTotalBytes()));
+
+                  Toast.makeText(getApplicationContext(), sb.toString(), Toast.LENGTH_LONG).show();
+
+                  new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+                      @Override
+                      public void run() {
+                          finish();
+                      }
+                  }, 1500);
+              }
+
+              private static String gb(long bytes) {
+                  return String.format(Locale.US, "%.1f ГБ", bytes / 1073741824.0);
+              }
+
+              private static String readCpuTemp() {
+                  try {
+                      BufferedReader r = new BufferedReader(
+                              new FileReader("/sys/class/thermal/thermal_zone0/temp"));
+                      String line = r.readLine();
+                      r.close();
+                      double v = Double.parseDouble(line.trim());
+                      if (v > 1000) v = v / 1000.0;
+                      return String.format(Locale.US, "%.1f°C", v);
+                  } catch (Throwable t) {
+                      return null;
+                  }
+              }
+          }
+          EOF
+
+      - name: Build APK
+        working-directory: proj
+        run: gradle assembleDebug --no-daemon
+
+      - name: Publish release with APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp proj/app/build/outputs/apk/debug/app-debug.apk meminfo.apk
+          gh release delete latest -y --cleanup-tag || true
+          gh release create latest meminfo.apk --title "MemInfo APK" --notes "Debug build"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: meminfo-apk
+          path: proj/app/build/outputs/apk/debug/app-debug.apk
